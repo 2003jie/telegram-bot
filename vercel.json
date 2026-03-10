@@ -1,11 +1,10 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/**/*.js",
-      "use": "@vercel/node"
+  "functions": {
+    "api/*.js": {
+      "maxDuration": 10
     }
-  ],
+  },
   "routes": [
     {
       "src": "/api/(.*)",
@@ -15,8 +14,5 @@
       "src": "/",
       "dest": "/api/webhook"
     }
-  ],
-  "env": {
-    "NODE_ENV": "production"
-  }
+  ]
 }
