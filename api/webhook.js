@@ -1,83 +1,42 @@
 /**
- * TG网盘机器人 v3.0
- * 使用 Telegram 私有群组作为存储，支持分类管理
+ * TG网盘机器人 v4.0 - Telegram话题版
  * 
  * 功能：
- * - 文件上传（视频/图片/文档/音频/语音）
- * - 分类选择（5个文件夹）
+ * - 使用Telegram话题实现真正文件夹分类
+ * - 自动识别文件类型
+ * - 显示上传者、上传时间
+ * - 视频/图片自动显示缩略图
  * - 6位短ID分享
- * - ID取回文件
- * - 文件夹浏览
- * - 存储统计
  */
 
 const TelegramBot = require('node-telegram-bot-api');
 
-// 环境变量配置
+// 环境变量
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const GROUP_ID = process.env.TELEGRAM_GROUP_ID;
 
+// 话题ID配置（在群组中创建话题后获取）
+const TOPIC_IDS = {
+  video: process.env.VIDEO_TOPIC_ID,      // 视频话题ID
+  photo: process.env.PHOTO_TOPIC_ID,      // 图片话题ID
+  document: process.env.DOCUMENT_TOPIC_ID // 文档话题ID
+};
+
 if (!TOKEN || !GROUP_ID) {
-  console.error('错误：缺少必要的环境变量 TELEGRAM_BOT_TOKEN 或 TELEGRAM_GROUP_ID');
+  console.error('错误：缺少必要的环境变量');
 }
 
 const bot = new TelegramBot(TOKEN, { webHook: true });
 
-// 内存缓存（重启后丢失，但文件在群组中永久保存）
+// 内存缓存
 const fileCache = new Map();
-const userPendingFiles = new Map();
 
-// 文件分类配置
-const FILE_CATEGORIES = {
-  video: { name: '视频', emoji: '🎬' },
-  photo: { name: '图片', emoji: '🖼' },
-  document: { name: '文档', emoji: '📄' },
-  audio: { name: '音频', emoji: '🎵' },
-  voice: { name: '语音', emoji: '🎤' }
+// 文件类型配置
+const FILE_TYPES = {
+  video: { name: '视频', emoji: '🎬', icon: '🎬' },
+  photo: { name: '图片', emoji: '🖼', icon: '🖼' },
+  document: { name: '文档', emoji: '📄', icon: '📄' }
 };
-
-/**
- * 生成分类选择键盘
- */
-function getCategoryKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        { text: '🎬 视频', callback_data: 'cat_video' },
-        { text: '🖼 图片', callback_data: 'cat_photo' }
-      ],
-      [
-        { text: '📄 文档', callback_data: 'cat_document' },
-        { text: '🎵 音频', callback_data: 'cat_audio' }
-      ],
-      [
-        { text: '🎤 语音', callback_data: 'cat_voice' }
-      ]
-    ]
-  };
-}
-
-/**
- * 生成文件夹菜单键盘
- */
-function getFolderKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        { text: '🎬 视频文件夹', callback_data: 'folder_video' },
-        { text: '🖼 图片文件夹', callback_data: 'folder_photo' }
-      ],
-      [
-        { text: '📄 文档文件夹', callback_data: 'folder_document' },
-        { text: '🎵 音频文件夹', callback_data: 'folder_audio' }
-      ],
-      [
-        { text: '🎤 语音文件夹', callback_data: 'folder_voice' },
-        { text: '📂 全部文件', callback_data: 'folder_all' }
-      ]
-    ]
-  };
-}
 
 /**
  * 生成6位短ID
@@ -102,33 +61,72 @@ function formatFileSize(bytes) {
 }
 
 /**
- * 主入口 - Vercel Serverless Function
+ * 格式化时间
+ */
+function formatTime(date) {
+  const d = new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hour = String(d.getHours()).padStart(2, '0');
+  const minute = String(d.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hour}:${minute}`;
+}
+
+/**
+ * 智能识别文件类型
+ */
+function detectFileType(fileInfo, msg) {
+  const fileName = (fileInfo.file_name || '').toLowerCase();
+  const mimeType = (fileInfo.mime_type || '').toLowerCase();
+  
+  // 根据Telegram消息类型判断
+  if (msg.video) return 'video';
+  if (msg.photo) return 'photo';
+  if (msg.document) {
+    // 视频文件后缀
+    const videoExts = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp'];
+    for (const ext of videoExts) {
+      if (fileName.endsWith(ext)) return 'video';
+    }
+    // 图片文件后缀
+    const photoExts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico'];
+    for (const ext of photoExts) {
+      if (fileName.endsWith(ext)) return 'photo';
+    }
+    // 默认文档
+    return 'document';
+  }
+  
+  return null;
+}
+
+/**
+ * 主入口
  */
 module.exports = async (req, res) => {
   try {
-    // GET 请求返回状态信息
     if (req.method !== 'POST') {
       return res.status(200).json({
         status: 'ok',
-        version: '3.0',
-        message: 'TG网盘机器人正在运行',
-        features: ['文件上传', '分类管理', 'ID分享', '文件夹浏览'],
-        storage: 'Telegram群组永久存储'
+        version: '4.0',
+        message: 'TG网盘机器人（话题版）正在运行',
+        features: ['话题分类', '自动识别', '上传信息', '缩略图'],
+        topics: Object.keys(FILE_TYPES)
       });
     }
 
     const update = req.body;
 
-    // 处理消息
     if (update.message) {
       const msg = update.message;
       const chatId = msg.chat.id;
 
-      // 文件上传
-      if (msg.video || msg.document || msg.photo || msg.audio || msg.voice) {
+      // 处理文件上传
+      if (msg.video || msg.document || msg.photo) {
         await handleFileUpload(bot, chatId, msg);
       }
-      // 文字消息
+      // 处理文字消息
       else if (msg.text) {
         await handleTextMessage(bot, chatId, msg);
       }
@@ -147,159 +145,141 @@ module.exports = async (req, res) => {
 };
 
 /**
- * 处理文件上传 - 第一步：让用户选择分类
+ * 处理文件上传 - 发送到对应话题
  */
 async function handleFileUpload(bot, chatId, msg) {
-  // 检查配置
   if (!GROUP_ID) {
-    return bot.sendMessage(chatId, '❌ 机器人未配置存储群组，请联系管理员设置 TELEGRAM_GROUP_ID');
+    return bot.sendMessage(chatId, '❌ 机器人未配置存储群组');
   }
 
   let fileInfo = null;
-  let fileType = '';
 
-  // 识别文件类型
+  // 获取文件信息
   if (msg.video) {
     fileInfo = msg.video;
-    fileType = 'video';
-  } else if (msg.document) {
-    fileInfo = msg.document;
-    fileType = 'document';
   } else if (msg.photo) {
     fileInfo = msg.photo[msg.photo.length - 1];
-    fileType = 'photo';
-  } else if (msg.audio) {
-    fileInfo = msg.audio;
-    fileType = 'audio';
-  } else if (msg.voice) {
-    fileInfo = msg.voice;
-    fileType = 'voice';
+  } else if (msg.document) {
+    fileInfo = msg.document;
   }
 
   if (!fileInfo) {
-    return bot.sendMessage(chatId, '❌ 无法识别文件类型，支持的类型：视频、图片、文档、音频、语音');
+    return bot.sendMessage(chatId, '❌ 无法识别文件类型');
   }
 
-  const fileName = fileInfo.file_name ||
-    (fileType === 'photo' ? 'image.jpg' :
-      fileType === 'voice' ? 'voice.ogg' : 'file');
+  // 智能识别文件类型
+  const fileType = detectFileType(fileInfo, msg);
+  
+  if (!fileType) {
+    return bot.sendMessage(chatId, '❌ 不支持的文件类型');
+  }
+
+  const typeConfig = FILE_TYPES[fileType];
+  const topicId = TOPIC_IDS[fileType];
+  
+  // 检查话题ID是否配置
+  if (!topicId) {
+    return bot.sendMessage(chatId, 
+      `❌ 未配置「${typeConfig.name}」话题ID\n` +
+      `请在环境变量中设置 ${fileType.toUpperCase()}_TOPIC_ID`
+    );
+  }
+
+  const fileName = fileInfo.file_name || (msg.photo ? 'image.jpg' : 'file');
   const fileSize = formatFileSize(fileInfo.file_size);
-
-  // 保存待处理文件信息
-  userPendingFiles.set(msg.from.id, {
-    fileId: fileInfo.file_id,
-    fileName,
-    fileSize,
-    fileType,
-    userName: msg.from.username || msg.from.first_name || '用户' + msg.from.id,
-    userId: msg.from.id,
-    chatId
-  });
-
-  // 询问分类
-  const typeNames = { video: '视频', photo: '图片', document: '文档', audio: '音频', voice: '语音' };
-
-  await bot.sendMessage(chatId,
-    `📤 <b>文件接收成功</b>\n\n` +
-    `📁 文件名：${fileName}\n` +
-    `📦 大小：${fileSize}\n` +
-    `🤖 自动识别：${typeNames[fileType] || '文件'}\n\n` +
-    `请选择保存的文件夹：`,
-    {
-      parse_mode: 'HTML',
-      reply_markup: getCategoryKeyboard()
-    }
-  );
-}
-
-/**
- * 处理分类选择 - 第二步：保存到群组
- */
-async function handleCategorySelection(bot, chatId, userId, category) {
-  const pendingFile = userPendingFiles.get(userId);
-
-  if (!pendingFile) {
-    return bot.sendMessage(chatId, '❌ 文件已过期，请重新上传');
-  }
-
-  const catConfig = FILE_CATEGORIES[category];
-  if (!catConfig) {
-    return bot.sendMessage(chatId, '❌ 无效的分类');
-  }
-
+  const userName = msg.from.username ? `@${msg.from.username}` : (msg.from.first_name || '未知用户');
+  const userId = msg.from.id;
+  const uploadTime = formatTime(new Date());
+  
   const shortId = generateShortId();
-  const caption = `🆔 ${shortId} | ${catConfig.emoji} ${catConfig.name}\n` +
-    `📁 ${pendingFile.fileName}\n` +
-    `💾 ${pendingFile.fileSize}\n` +
-    `👤 ${pendingFile.userName}`;
+  
+  // 构建Caption（包含所有信息）
+  const caption = `🆔 <code>${shortId}</code>\n` +
+                  `📁 ${fileName}\n` +
+                  `💾 ${fileSize}\n` +
+                  `👤 上传者：${userName}\n` +
+                  `🕐 时间：${uploadTime}`;
 
   try {
-    // 转发文件到存储群组
+    // 发送选项 - 指定话题ID
+    const sendOptions = {
+      caption,
+      parse_mode: 'HTML',
+      message_thread_id: parseInt(topicId) // 话题ID
+    };
+
+    // 根据类型发送到对应话题
     let forwardedMsg;
-    switch (pendingFile.fileType) {
+    
+    switch (fileType) {
       case 'video':
-        forwardedMsg = await bot.sendVideo(GROUP_ID, pendingFile.fileId, { caption });
+        // 视频会自动显示缩略图
+        forwardedMsg = await bot.sendVideo(GROUP_ID, fileInfo.file_id, sendOptions);
         break;
       case 'photo':
-        forwardedMsg = await bot.sendPhoto(GROUP_ID, pendingFile.fileId, { caption });
+        // 图片会自动显示缩略图
+        forwardedMsg = await bot.sendPhoto(GROUP_ID, fileInfo.file_id, sendOptions);
         break;
       case 'document':
-        forwardedMsg = await bot.sendDocument(GROUP_ID, pendingFile.fileId, { caption });
-        break;
-      case 'audio':
-        forwardedMsg = await bot.sendAudio(GROUP_ID, pendingFile.fileId, { caption });
-        break;
-      case 'voice':
-        forwardedMsg = await bot.sendVoice(GROUP_ID, pendingFile.fileId, { caption });
+        // 文档部分类型也有缩略图
+        forwardedMsg = await bot.sendDocument(GROUP_ID, fileInfo.file_id, sendOptions);
         break;
     }
 
     // 保存到缓存
     fileCache.set(shortId, {
       messageId: forwardedMsg.message_id,
-      fileType: pendingFile.fileType,
-      category,
-      fileName: pendingFile.fileName,
-      fileSize: pendingFile.fileSize,
-      userName: pendingFile.userName,
-      userId: userId,
+      fileType,
+      category: fileType,
+      fileName,
+      fileSize,
+      userName,
+      userId,
+      uploadTime,
+      topicId,
+      groupId: GROUP_ID,
       timestamp: Date.now()
     });
 
-    // 清除待处理状态
-    userPendingFiles.delete(userId);
-
-    // 发送成功消息
-    await bot.sendMessage(chatId,
+    // 发送成功消息给用户
+    const successMsg = 
       `✅ <b>文件保存成功！</b>\n\n` +
-      `${catConfig.emoji} 文件夹：${catConfig.name}\n` +
-      `📁 文件名：${pendingFile.fileName}\n` +
-      `📦 大小：${pendingFile.fileSize}\n` +
+      `${typeConfig.emoji} 分类：${typeConfig.name}\n` +
+      `📁 文件名：${fileName}\n` +
+      `📦 大小：${fileSize}\n` +
       `🆔 分享ID：<code>${shortId}</code>\n\n` +
-      `<b>分享方式：</b>\n` +
-      `• 直接发送ID给别人\n` +
-      `• 别人发送ID给我就能获取文件\n\n` +
-      `<b>✨ 文件永久保存在「${catConfig.name}」文件夹</b>`,
-      {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '📋 复制ID', callback_data: `copy_${shortId}` },
-              { text: '📤 分享', url: `https://t.me/share/url?url=${shortId}&text=分享文件给你！` }
-            ],
-            [{ text: '📂 打开网盘', callback_data: 'open_folder' }]
-          ]
-        }
-      }
-    );
+      `👤 上传者：${userName}\n` +
+      `🕐 时间：${uploadTime}\n\n` +
+      `<b>✨ 已保存到「${typeConfig.name}」话题</b>`;
 
-    console.log(`[保存成功] ID:${shortId} 分类:${category} 用户:${pendingFile.userName}`);
+    await bot.sendMessage(chatId, successMsg, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '📋 复制ID', callback_data: `copy_${shortId}` },
+            { text: '📤 分享', url: `https://t.me/share/url?url=${shortId}&text=分享文件给你！` }
+          ],
+          [
+            { text: '🎬 视频话题', callback_data: 'topic_video' },
+            { text: '🖼 图片话题', callback_data: 'topic_photo' },
+            { text: '📄 文档话题', callback_data: 'topic_document' }
+          ]
+        ]
+      }
+    });
+
+    console.log(`[话题保存] ID:${shortId} 类型:${fileType} 话题:${topicId} 用户:${userName}`);
 
   } catch (error) {
     console.error('保存文件失败:', error);
-    await bot.sendMessage(chatId, '❌ 文件保存失败，请确保：\n1. 机器人是群组管理员\n2. 群组ID配置正确\n3. 群组存在且机器人已在群内');
-    userPendingFiles.delete(userId);
+    await bot.sendMessage(chatId, 
+      '❌ 文件保存失败\n\n' +
+      '可能原因：\n' +
+      '1. 机器人不是群组管理员\n' +
+      '2. 话题ID配置错误\n' +
+      '3. 话题不存在'
+    );
   }
 }
 
@@ -309,12 +289,11 @@ async function handleCategorySelection(bot, chatId, userId, category) {
 async function handleTextMessage(bot, chatId, msg) {
   const text = msg.text.trim();
 
-  // 处理命令
   if (text.startsWith('/')) {
     return handleCommand(bot, chatId, text, msg);
   }
 
-  // 检查是否是文件ID（6位字母数字）
+  // 检查是否是文件ID（6位）
   const idPattern = /^[A-Za-z0-9]{6}$/;
 
   if (idPattern.test(text)) {
@@ -322,44 +301,49 @@ async function handleTextMessage(bot, chatId, msg) {
   } else {
     await bot.sendMessage(chatId,
       `👋 <b>欢迎使用TG网盘机器人！</b>\n\n` +
-      `📤 <b>上传文件：</b>直接发送文件，选择分类\n` +
-      `📥 <b>获取文件：</b>发送6位分享ID\n` +
-      `📂 <b>浏览网盘：</b>发送 /folder 查看分类\n\n` +
-      `支持的文件：视频 🎬、图片 🖼、文档 📄、音频 🎵、语音 🎤`,
+      `📤 发送文件自动分类到话题\n` +
+      `📥 发送6位ID取回文件\n\n` +
+      `🎬 视频话题 🖼 图片话题 📄 文档话题`,
       { parse_mode: 'HTML' }
     );
   }
 }
 
 /**
- * 处理文件请求（通过ID取回）
+ * 处理文件请求
  */
 async function handleFileRequest(bot, chatId, shareId, msg) {
   const fileInfo = fileCache.get(shareId);
 
   if (!fileInfo) {
     return bot.sendMessage(chatId,
-      `❌ 找不到该文件\n\n` +
-      `可能的原因：\n` +
-      `• ID错误或已过期\n` +
-      `• 机器人重启后缓存丢失（文件仍在群组中）\n\n` +
-      `<b>💡 解决方法：</b>可从群组转发文件给我`,
+      `❌ 找不到该文件\n` +
+      `ID可能错误或已过期`,
       { parse_mode: 'HTML' }
     );
   }
 
-  const catConfig = FILE_CATEGORIES[fileInfo.category] || { emoji: '📁', name: '文件' };
+  const typeConfig = FILE_TYPES[fileInfo.category];
 
   try {
-    await bot.copyMessage(chatId, GROUP_ID, fileInfo.messageId, {
-      caption: `${catConfig.emoji} ${fileInfo.fileName}\n💾 ${fileInfo.fileSize}\n🆔 ${shareId}`
-    });
-
-    console.log(`[发送成功] ID:${shareId} 给用户:${msg.from.username || msg.from.first_name}`);
+    // 从原话题复制文件
+    await bot.copyMessage(chatId, fileInfo.groupId, fileInfo.messageId);
+    
+    // 发送文件信息
+    await bot.sendMessage(chatId,
+      `📋 <b>文件信息</b>\n\n` +
+      `${typeConfig.emoji} 分类：${typeConfig.name}\n` +
+      `📁 文件名：${fileInfo.fileName}\n` +
+      `💾 大小：${fileInfo.fileSize}\n` +
+      `👤 上传者：${fileInfo.userName}\n` +
+      `🕐 上传时间：${fileInfo.uploadTime}\n` +
+      `🆔 ID：<code>${shareId}</code>`,
+      { parse_mode: 'HTML' }
+    );
 
   } catch (error) {
     console.error('发送文件失败:', error);
-    await bot.sendMessage(chatId, '❌ 文件发送失败，可能已被删除或群组不可访问');
+    await bot.sendMessage(chatId, '❌ 文件发送失败');
   }
 }
 
@@ -371,24 +355,30 @@ async function handleCommand(bot, chatId, text, msg) {
 
   switch (command) {
     case '/start':
-      // 处理启动参数（如 /start Ab3x9K）
       const args = text.split(' ');
       if (args.length > 1 && args[1].length === 6) {
         return handleFileRequest(bot, chatId, args[1], msg);
       }
 
       await bot.sendMessage(chatId,
-        `👋 <b>欢迎使用 TG网盘机器人 v3.0！</b>\n\n` +
-        `📤 <b>上传文件</b>\n` +
-        `发送视频、图片、文档，选择分类保存\n\n` +
-        `📥 <b>获取文件</b>\n` +
-        `发送6位分享ID（如：Ab3x9K）\n\n` +
-        `📂 <b>浏览网盘</b>\n` +
-        `使用 /folder 查看分类文件夹\n\n` +
-        `✨ <b>文件分类存储，永久保存！</b>`,
+        `👋 <b>TG网盘机器人 v4.0</b>\n\n` +
+        `📁 <b>话题分类存储</b>\n` +
+        `🎬 视频 → 视频话题\n` +
+        `🖼 图片 → 图片话题\n` +
+        `📄 文档 → 文档话题\n\n` +
+        `📋 显示上传者、时间、缩略图\n` +
+        `🔍 发送6位ID取回文件`,
         {
           parse_mode: 'HTML',
-          reply_markup: getFolderKeyboard()
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '🎬 视频话题', callback_data: 'topic_video' },
+                { text: '🖼 图片话题', callback_data: 'topic_photo' },
+                { text: '📄 文档话题', callback_data: 'topic_document' }
+              ]
+            ]
+          }
         }
       );
       break;
@@ -396,27 +386,35 @@ async function handleCommand(bot, chatId, text, msg) {
     case '/help':
       await bot.sendMessage(chatId,
         `📖 <b>使用帮助</b>\n\n` +
-        `<b>📤 上传文件：</b>\n` +
-        `1. 发送文件给机器人\n` +
-        `2. 选择分类（视频/图片/文档/音频/语音）\n` +
-        `3. 获得分享ID\n\n` +
-        `<b>📥 下载文件：</b>\n` +
-        `发送分享ID（如：Ab3x9K）\n\n` +
-        `<b>📂 浏览网盘：</b>\n` +
-        `发送 /folder 打开分类文件夹\n` +
-        `发送 /stats 查看存储统计\n\n` +
-        `<b>✨ 所有文件永久分类保存！</b>`,
+        `<b>上传文件：</b>\n` +
+        `直接发送，自动分类到对应话题\n\n` +
+        `<b>文件信息：</b>\n` +
+        `• 上传者\n` +
+        `• 上传时间\n` +
+        `• 缩略图（视频/图片）\n\n` +
+        `<b>取回文件：</b>\n` +
+        `发送分享ID`,
         { parse_mode: 'HTML' }
       );
       break;
 
-    case '/folder':
-    case '/folders':
+    case '/topics':
       await bot.sendMessage(chatId,
-        `📂 <b>我的网盘</b>\n\n选择文件夹查看文件：`,
+        `📂 <b>网盘话题</b>\n\n` +
+        `点击跳转到对应话题：`,
         {
           parse_mode: 'HTML',
-          reply_markup: getFolderKeyboard()
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '🎬 视频话题', url: `https://t.me/c/${GROUP_ID.replace('-100', '')}/${TOPIC_IDS.video}` },
+                { text: '🖼 图片话题', url: `https://t.me/c/${GROUP_ID.replace('-100', '')}/${TOPIC_IDS.photo}` }
+              ],
+              [
+                { text: '📄 文档话题', url: `https://t.me/c/${GROUP_ID.replace('-100', '')}/${TOPIC_IDS.document}` }
+              ]
+            ]
+          }
         }
       );
       break;
@@ -425,13 +423,10 @@ async function handleCommand(bot, chatId, text, msg) {
       const stats = getStats();
       await bot.sendMessage(chatId,
         `📊 <b>网盘统计</b>\n\n` +
-        `📁 已存储文件：${stats.totalFiles}\n` +
-        `🎬 视频：${stats.videoCount}\n` +
-        `🖼 图片：${stats.photoCount}\n` +
-        `📄 文档：${stats.documentCount}\n` +
-        `🎵 音频：${stats.audioCount}\n` +
-        `🎤 语音：${stats.voiceCount}\n\n` +
-        `<b>✨ 所有文件分类保存</b>`,
+        `📁 总计：${stats.totalFiles} 个文件\n` +
+        `🎬 视频：${stats.videoCount} 个\n` +
+        `🖼 图片：${stats.photoCount} 个\n` +
+        `📄 文档：${stats.documentCount} 个`,
         { parse_mode: 'HTML' }
       );
       break;
@@ -449,28 +444,11 @@ async function handleCallbackQuery(bot, callbackQuery) {
   const data = callbackQuery.data;
   const userId = callbackQuery.from.id;
 
-  if (data.startsWith('cat_')) {
-    // 分类选择
-    const category = data.substring(4);
-    await handleCategorySelection(bot, chatId, userId, category);
-  }
-  else if (data.startsWith('folder_')) {
-    // 文件夹浏览
-    const folder = data.substring(7);
-    await handleFolderView(bot, chatId, userId, folder);
-  }
-  else if (data === 'open_folder') {
-    // 打开网盘
-    await bot.sendMessage(chatId,
-      `📂 <b>我的网盘</b>\n\n选择文件夹：`,
-      {
-        parse_mode: 'HTML',
-        reply_markup: getFolderKeyboard()
-      }
-    );
+  if (data.startsWith('topic_')) {
+    const topic = data.substring(6);
+    await handleTopicView(bot, chatId, userId, topic);
   }
   else if (data.startsWith('copy_')) {
-    // 复制ID
     const id = data.substring(5);
     await bot.sendMessage(chatId,
       `📋 分享ID：<code>${id}</code>\n\n复制上面这串代码发送给别人`,
@@ -482,90 +460,89 @@ async function handleCallbackQuery(bot, callbackQuery) {
 }
 
 /**
- * 查看文件夹内容
+ * 查看话题内容
  */
-async function handleFolderView(bot, chatId, userId, folder) {
-  // 统计该用户的文件
+async function handleTopicView(bot, chatId, userId, topic) {
+  const typeConfig = FILE_TYPES[topic];
+  if (!typeConfig) return;
+
   const userFiles = [];
   for (const [id, info] of fileCache.entries()) {
-    if (info.userId === userId && (folder === 'all' || info.category === folder)) {
+    if (info.userId === userId && info.category === topic) {
       userFiles.push({ id, ...info });
     }
   }
 
-  // 全部文件 - 显示概览
-  if (folder === 'all') {
-    const catCounts = {};
-    for (const [id, info] of fileCache.entries()) {
-      if (info.userId === userId) {
-        catCounts[info.category] = (catCounts[info.category] || 0) + 1;
-      }
-    }
+  // 生成话题链接
+  const topicId = TOPIC_IDS[topic];
+  const groupLink = GROUP_ID.replace('-100', '');
+  const topicLink = topicId ? `https://t.me/c/${groupLink}/${topicId}` : null;
 
-    let summary = '📂 <b>我的网盘概览</b>\n\n';
-    for (const [cat, count] of Object.entries(catCounts)) {
-      const catConfig = FILE_CATEGORIES[cat];
-      if (catConfig) {
-        summary += `${catConfig.emoji} ${catConfig.name}：${count} 个文件\n`;
-      }
-    }
-    summary += `\n📊 总计：${userFiles.length} 个文件`;
+  if (userFiles.length === 0) {
+    const msg = 
+      `${typeConfig.emoji} <b>${typeConfig.name}话题</b>\n\n` +
+      `你还没有上传过${typeConfig.name}。\n\n`;
+    
+    const keyboard = topicLink ? {
+      inline_keyboard: [[{ text: `📂 进入${typeConfig.name}话题`, url: topicLink }]]
+    } : undefined;
 
-    return bot.sendMessage(chatId, summary, {
+    return bot.sendMessage(chatId, msg, {
       parse_mode: 'HTML',
-      reply_markup: getFolderKeyboard()
+      reply_markup: keyboard
     });
   }
 
-  // 特定文件夹
-  const catConfig = FILE_CATEGORIES[folder];
-  if (!catConfig) {
-    return bot.sendMessage(chatId, '❌ 无效的文件夹');
-  }
-
-  if (userFiles.length === 0) {
-    return bot.sendMessage(chatId,
-      `${catConfig.emoji} <b>${catConfig.name}文件夹</b>\n\n` +
-      `这里还没有文件。\n\n` +
-      `发送${catConfig.name}给我开始上传！`,
-      {
-        parse_mode: 'HTML',
-        reply_markup: getFolderKeyboard()
-      }
-    );
-  }
-
-  let fileList = `${catConfig.emoji} <b>${catConfig.name}文件夹</b>\n` +
+  let fileList = 
+    `${typeConfig.emoji} <b>${typeConfig.name}话题</b>\n` +
     `共 ${userFiles.length} 个文件\n\n`;
 
-  userFiles.slice(0, 15).forEach((file, index) => {
+  userFiles.slice(0, 10).forEach((file, index) => {
     fileList += `${index + 1}. ${file.fileName}\n`;
-    fileList += `   💾 ${file.fileSize}  🆔 <code>${file.id}</code>\n\n`;
+    fileList += `   💾 ${file.fileSize}  🆔 <code>${file.id}</code>\n`;
+    fileList += `   👤 ${file.userName}  🕐 ${file.uploadTime}\n\n`;
   });
 
-  if (userFiles.length > 15) {
-    fileList += `... 还有 ${userFiles.length - 15} 个文件`;
+  if (userFiles.length > 10) {
+    fileList += `... 还有 ${userFiles.length - 10} 个文件`;
   }
+
+  const keyboard = topicLink ? {
+    inline_keyboard: [
+      [{ text: `📂 进入${typeConfig.name}话题查看全部`, url: topicLink }],
+      [
+        { text: '🎬 视频', callback_data: 'topic_video' },
+        { text: '🖼 图片', callback_data: 'topic_photo' },
+        { text: '📄 文档', callback_data: 'topic_document' }
+      ]
+    ]
+  } : {
+    inline_keyboard: [
+      [
+        { text: '🎬 视频', callback_data: 'topic_video' },
+        { text: '🖼 图片', callback_data: 'topic_photo' },
+        { text: '📄 文档', callback_data: 'topic_document' }
+      ]
+    ]
+  };
 
   await bot.sendMessage(chatId, fileList, {
     parse_mode: 'HTML',
-    reply_markup: getFolderKeyboard()
+    reply_markup: keyboard
   });
 }
 
 /**
- * 获取统计信息
+ * 获取统计
  */
 function getStats() {
-  let videoCount = 0, photoCount = 0, documentCount = 0, audioCount = 0, voiceCount = 0;
+  let videoCount = 0, photoCount = 0, documentCount = 0;
 
   for (const file of fileCache.values()) {
     switch (file.category) {
       case 'video': videoCount++; break;
       case 'photo': photoCount++; break;
       case 'document': documentCount++; break;
-      case 'audio': audioCount++; break;
-      case 'voice': voiceCount++; break;
     }
   }
 
@@ -573,8 +550,6 @@ function getStats() {
     totalFiles: fileCache.size,
     videoCount,
     photoCount,
-    documentCount,
-    audioCount,
-    voiceCount
+    documentCount
   };
 }
