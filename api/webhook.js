@@ -11,12 +11,18 @@
 
 const TelegramBot = require('node-telegram-bot-api');
 
-// 尝试导入 Vercel KV
-let kv;
+// 尝试连接 Redis (使用 KV_URL 环境变量)
+let redis;
 try {
-  kv = require('@vercel/kv');
+  const Redis = require('ioredis');
+  if (process.env.KV_URL) {
+    redis = new Redis(process.env.KV_URL);
+    console.log('Redis 连接成功');
+  } else {
+    console.log('KV_URL 未设置，使用内存缓存');
+  }
 } catch (e) {
-  console.log('Vercel KV 未安装，使用内存缓存');
+  console.log('Redis 连接失败，使用内存缓存:', e.message);
 }
 
 // 环境变量
@@ -84,9 +90,9 @@ async function saveFileInfo(fileId, fileInfo) {
   const data = JSON.stringify(fileInfo);
   const encrypted = encrypt(data, ENCRYPTION_KEY);
   
-  // 优先使用 KV，否则用内存
-  if (kv) {
-    await kv.set(fileId, encrypted);
+  // 优先使用 Redis，否则用内存
+  if (redis) {
+    await redis.set(fileId, encrypted);
   } else {
     memoryCache.set(fileId, encrypted);
   }
@@ -98,12 +104,12 @@ async function saveFileInfo(fileId, fileInfo) {
 async function getFileInfo(fileId) {
   let encrypted;
   
-  // 优先从 KV 读取
-  if (kv) {
-    encrypted = await kv.get(fileId);
+  // 优先从 Redis 读取
+  if (redis) {
+    encrypted = await redis.get(fileId);
   }
   
-  // KV 没有则从内存读取
+  // Redis 没有则从内存读取
   if (!encrypted && memoryCache.has(fileId)) {
     encrypted = memoryCache.get(fileId);
   }
@@ -294,7 +300,7 @@ async function handleFileUpload(bot, chatId, msg) {
     await saveFileInfo(shortId, fileData);
 
     // 发送成功消息
-    const storageMsg = kv ? '🔐 已加密保存到数据库' : '💾 已保存到内存（重启后丢失）';
+    const storageMsg = redis ? '🔐 已加密保存到数据库' : '💾 已保存到内存（重启后丢失）';
     
     await bot.sendMessage(chatId,
       `✅ <b>文件保存成功！</b>\n\n` +
@@ -405,7 +411,7 @@ async function handleCommand(bot, chatId, text, msg) {
       }
 
       const encryptStatus = ENCRYPTION_KEY ? '🔐 加密已启用' : '⚠️ 加密未启用';
-      const storageStatus = kv ? '✅ 持久化存储' : '⚠️ 内存存储（重启丢失）';
+      const storageStatus = redis ? '✅ 持久化存储' : '⚠️ 内存存储（重启丢失）';
 
       await bot.sendMessage(chatId,
         `👋 <b>TG网盘机器人 v4.1</b>\n\n` +
