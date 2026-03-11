@@ -11,18 +11,89 @@
 
 const TelegramBot = require('node-telegram-bot-api');
 
-// 尝试连接 Redis (使用 KV_URL 环境变量)
-let redis;
-try {
-  const Redis = require('ioredis');
-  if (process.env.KV_URL) {
-    redis = new Redis(process.env.KV_URL);
-    console.log('Redis 连接成功');
-  } else {
-    console.log('KV_URL 未设置，使用内存缓存');
+// 存储适配器（支持 REST API、Redis 直连或内存）
+let storage = null;
+let storageType = 'memory';
+
+async function initStorage() {
+  // 方案 1: Upstash REST API（推荐，适合 Serverless）
+  if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
+    try {
+      const url = process.env.UPSTASH_REDIS_REST_URL;
+      const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+      
+      storage = {
+        async set(key, value) {
+          const response = await fetch(`${url}/set/${key}`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(value)
+          });
+          if (!response.ok) throw new Error('SET failed');
+        },
+        async get(key) {
+          const response = await fetch(`${url}/get/${key}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (!response.ok) return null;
+          const data = await response.json();
+          return data.result;
+        }
+      };
+      storageType = 'redis-rest';
+      console.log('Upstash REST API 连接成功');
+      return true;
+    } catch (e) {
+      console.log('Upstash REST API 连接失败:', e.message);
+    }
   }
-} catch (e) {
-  console.log('Redis 连接失败，使用内存缓存:', e.message);
+  
+  // 方案 2: Redis 直连（可能因网络限制失败）
+  const redisUrl = process.env.UPSTASH_REDIS_URL || process.env.REDIS_URL || process.env.KV_URL;
+  if (redisUrl) {
+    try {
+      const Redis = require('ioredis');
+      const redis = new Redis(redisUrl, {
+        connectTimeout: 5000,
+        lazyConnect: true,
+        retryStrategy: () => null  // 不重试，快速失败
+      });
+      
+      await redis.connect();
+      await redis.ping();
+      
+      storage = {
+        async set(key, value) {
+          await redis.set(key, value);
+        },
+        async get(key) {
+          return await redis.get(key);
+        }
+      };
+      storageType = 'redis';
+      console.log('Redis 直连成功');
+      return true;
+    } catch (e) {
+      console.log('Redis 直连失败:', e.message);
+    }
+  }
+  
+  // 方案 3: 内存存储（备用）
+  const memoryStore = new Map();
+  storage = {
+    async set(key, value) {
+      memoryStore.set(key, value);
+    },
+    async get(key) {
+      return memoryStore.get(key);
+    }
+  };
+  storageType = 'memory';
+  console.log('使用内存存储');
+  return false;
 }
 
 // 环境变量
@@ -90,10 +161,11 @@ async function saveFileInfo(fileId, fileInfo) {
   const data = JSON.stringify(fileInfo);
   const encrypted = encrypt(data, ENCRYPTION_KEY);
   
-  // 优先使用 Redis，否则用内存
-  if (redis) {
-    await redis.set(fileId, encrypted);
-  } else {
+  try {
+    await storage.set(fileId, encrypted);
+    console.log(`[${storageType}] 已保存: ${fileId}`);
+  } catch (e) {
+    console.log(`[${storageType}] 保存失败: ${e.message}`);
     memoryCache.set(fileId, encrypted);
   }
 }
@@ -104,14 +176,17 @@ async function saveFileInfo(fileId, fileInfo) {
 async function getFileInfo(fileId) {
   let encrypted;
   
-  // 优先从 Redis 读取
-  if (redis) {
-    encrypted = await redis.get(fileId);
+  try {
+    encrypted = await storage.get(fileId);
+    if (encrypted) console.log(`[${storageType}] 已读取: ${fileId}`);
+  } catch (e) {
+    console.log(`[${storageType}] 读取失败: ${e.message}`);
   }
   
-  // Redis 没有则从内存读取
+  // storage 没有则从备用内存读取
   if (!encrypted && memoryCache.has(fileId)) {
     encrypted = memoryCache.get(fileId);
+    console.log(`[Memory] 已读取: ${fileId}`);
   }
   
   if (!encrypted) return null;
@@ -182,6 +257,11 @@ function detectFileType(fileInfo, msg) {
  * 主入口
  */
 module.exports = async (req, res) => {
+  // 初始化存储（第一次请求时）
+  if (!storage) {
+    await initStorage();
+  }
+  
   try {
     if (req.method !== 'POST') {
       return res.status(200).json({
@@ -189,7 +269,8 @@ module.exports = async (req, res) => {
         version: '4.1',
         message: 'TG网盘机器人（加密存储版）正在运行',
         features: ['加密存储', '话题分类', '持久化'],
-        encryption: ENCRYPTION_KEY ? 'enabled' : 'disabled'
+        encryption: ENCRYPTION_KEY ? 'enabled' : 'disabled',
+        storage: storageType
       });
     }
 
@@ -300,7 +381,7 @@ async function handleFileUpload(bot, chatId, msg) {
     await saveFileInfo(shortId, fileData);
 
     // 发送成功消息
-    const storageMsg = redis ? '🔐 已加密保存到数据库' : '💾 已保存到内存（重启后丢失）';
+    const storageMsg = (storageType === 'redis') ? '🔐 已加密保存到数据库' : '💾 已保存到内存（重启后丢失）';
     
     await bot.sendMessage(chatId,
       `✅ <b>文件保存成功！</b>\n\n` +
@@ -411,7 +492,7 @@ async function handleCommand(bot, chatId, text, msg) {
       }
 
       const encryptStatus = ENCRYPTION_KEY ? '🔐 加密已启用' : '⚠️ 加密未启用';
-      const storageStatus = redis ? '✅ 持久化存储' : '⚠️ 内存存储（重启丢失）';
+      const storageStatus = (storageType === 'redis') ? '✅ 持久化存储' : '⚠️ 内存存储（重启丢失）';
 
       await bot.sendMessage(chatId,
         `👋 <b>TG网盘机器人 v4.1</b>\n\n` +
