@@ -1,0 +1,30 @@
+{
+  "name": "tg-file-cloud-bot",
+  "version": "3.0.0",
+  "description": "TG网盘机器人 - 利用Telegram群组作为无限网盘，支持分类管理",
+  "main": "api/webhook.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod",
+    "logs": "vercel logs --all"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "cloud",
+    "storage",
+    "file-sharing",
+    "vercel"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0"
+  },
+  "devDependencies": {
+    "vercel": "^33.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
